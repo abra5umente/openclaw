@@ -76,4 +76,5 @@ export type AgentCommandOpts = {
   inputProvenance?: InputProvenance;
   /** Per-call stream param overrides (best-effort). */
   streamParams?: AgentStreamParams;
+  onReasoningStream?: (payload: { text?: string }) => void | Promise<void>;
 };

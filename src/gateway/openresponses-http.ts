@@ -56,6 +56,14 @@ type OpenResponsesHttpOptions = {
   config?: GatewayHttpResponsesConfig;
   trustedProxies?: string[];
   rateLimiter?: AuthRateLimiter;
+  broadcast?: (
+    event: string,
+    payload: unknown,
+    opts?: {
+      dropIfSlow?: boolean;
+      stateVersion?: { presence?: number; health?: number };
+    },
+  ) => void;
 };
 
 const DEFAULT_BODY_BYTES = 20 * 1024 * 1024;
@@ -309,6 +317,7 @@ async function runResponsesAgentCommand(params: {
   sessionKey: string;
   runId: string;
   deps: ReturnType<typeof createDefaultDeps>;
+  onReasoningStream?: (payload: { text?: string }) => void | Promise<void>;
 }) {
   return agentCommand(
     {
@@ -322,6 +331,7 @@ async function runResponsesAgentCommand(params: {
       deliver: false,
       messageChannel: "webchat",
       bestEffortDeliver: false,
+      onReasoningStream: params.onReasoningStream,
     },
     defaultRuntime,
     params.deps,
@@ -531,6 +541,10 @@ export async function handleOpenResponsesHttpRequest(
       const payloads = (result as { payloads?: Array<{ text?: string }> } | null)?.payloads;
       const usage = extractUsageFromResult(result);
       const meta = (result as { meta?: unknown } | null)?.meta;
+      const resolvedModel =
+        (meta && typeof meta === "object"
+          ? (meta as { agentMeta?: { model?: string } }).agentMeta?.model
+          : undefined) || model;
       const stopReason =
         meta && typeof meta === "object" ? (meta as { stopReason?: string }).stopReason : undefined;
       const pendingToolCalls =
@@ -545,7 +559,7 @@ export async function handleOpenResponsesHttpRequest(
         const functionCallItemId = `call_${randomUUID()}`;
         const response = createResponseResource({
           id: responseId,
-          model,
+          model: resolvedModel,
           status: "incomplete",
           output: [
             {
@@ -572,7 +586,7 @@ export async function handleOpenResponsesHttpRequest(
 
       const response = createResponseResource({
         id: responseId,
-        model,
+        model: resolvedModel,
         status: "completed",
         output: [
           createAssistantOutputItem({ id: outputItemId, text: content, status: "completed" }),
@@ -606,6 +620,7 @@ export async function handleOpenResponsesHttpRequest(
   let closed = false;
   let unsubscribe = () => {};
   let finalUsage: Usage | undefined;
+  let resolvedStreamModel: string = model;
   let finalizeRequested: { status: ResponseResource["status"]; text: string } | null = null;
 
   const maybeFinalize = () => {
@@ -653,13 +668,22 @@ export async function handleOpenResponsesHttpRequest(
 
     const finalResponse = createResponseResource({
       id: responseId,
-      model,
+      model: resolvedStreamModel,
       status: finalizeRequested.status,
       output: [completedItem],
       usage,
     });
 
     writeSseEvent(res, { type: "response.completed", response: finalResponse });
+    if (opts.broadcast) {
+      opts.broadcast("agent", {
+        runId: responseId,
+        stream: "lifecycle",
+        sessionKey,
+        data: { phase: "end", text: finalizeRequested.text },
+        seq: 0,
+      });
+    }
     writeDone(res);
     res.end();
   };
@@ -705,6 +729,33 @@ export async function handleOpenResponsesHttpRequest(
     part: { type: "output_text", text: "" },
   });
 
+  const onReasoningStream = (payload: { text?: string }) => {
+    if (closed) {
+      return;
+    }
+    const text = payload.text ?? "";
+    if (!text) {
+      return;
+    }
+    const sseEvent = {
+      type: "response.reasoning.delta",
+      item_id: outputItemId,
+      output_index: 0,
+      content_index: 0,
+      delta: text,
+    } as const;
+    writeSseEvent(res, sseEvent);
+    if (opts.broadcast) {
+      opts.broadcast("agent", {
+        runId: responseId,
+        stream: "reasoning",
+        sessionKey,
+        data: { delta: text },
+        seq: 0,
+      });
+    }
+  };
+
   unsubscribe = onAgentEvent((evt) => {
     if (evt.runId !== responseId) {
       return;
@@ -722,13 +773,74 @@ export async function handleOpenResponsesHttpRequest(
       sawAssistantDelta = true;
       accumulatedText += content;
 
-      writeSseEvent(res, {
+      const sseEvent = {
         type: "response.output_text.delta",
         item_id: outputItemId,
         output_index: 0,
         content_index: 0,
         delta: content,
-      });
+      } as const;
+      writeSseEvent(res, sseEvent);
+      if (opts.broadcast) {
+        opts.broadcast("agent", {
+          runId: responseId,
+          stream: "assistant",
+          sessionKey,
+          data: { delta: content },
+          seq: evt.seq,
+        });
+      }
+      return;
+    }
+
+    if (evt.stream === "tool") {
+      const phase = evt.data?.phase;
+      const toolName = evt.data?.name;
+      const toolCallId = evt.data?.toolCallId;
+      if (phase === "start" && toolName) {
+        writeSseEvent(res, {
+          type: "response.tool.start",
+          item_id: outputItemId,
+          output_index: 0,
+          tool_call_id: toolCallId,
+          name: toolName,
+          args: evt.data?.args,
+        } as unknown as StreamingEvent);
+        if (opts.broadcast) {
+          opts.broadcast("agent", {
+            runId: responseId,
+            stream: "tool",
+            sessionKey,
+            data: { phase: "start", name: toolName, toolCallId, args: evt.data?.args },
+            seq: evt.seq,
+          });
+        }
+      } else if (phase === "result" && toolName) {
+        writeSseEvent(res, {
+          type: "response.tool.done",
+          item_id: outputItemId,
+          output_index: 0,
+          tool_call_id: toolCallId,
+          name: toolName,
+          result: evt.data?.result,
+          is_error: evt.data?.isError,
+        } as unknown as StreamingEvent);
+        if (opts.broadcast) {
+          opts.broadcast("agent", {
+            runId: responseId,
+            stream: "tool",
+            sessionKey,
+            data: {
+              phase: "result",
+              name: toolName,
+              toolCallId,
+              result: evt.data?.result,
+              isError: evt.data?.isError,
+            },
+            seq: evt.seq,
+          });
+        }
+      }
       return;
     }
 
@@ -738,6 +850,15 @@ export async function handleOpenResponsesHttpRequest(
         const finalText = accumulatedText || "No response from OpenClaw.";
         const finalStatus = phase === "error" ? "failed" : "completed";
         requestFinalize(finalStatus, finalText);
+      }
+      if (opts.broadcast) {
+        opts.broadcast("agent", {
+          runId: responseId,
+          stream: "lifecycle",
+          sessionKey,
+          data: { phase },
+          seq: evt.seq,
+        });
       }
     }
   });
@@ -758,9 +879,14 @@ export async function handleOpenResponsesHttpRequest(
         sessionKey,
         runId: responseId,
         deps,
+        onReasoningStream,
       });
 
       finalUsage = extractUsageFromResult(result);
+      const resultMeta = (result as { meta?: { agentMeta?: { model?: string } } } | null)?.meta;
+      resolvedStreamModel =
+        (resultMeta && typeof resultMeta === "object" ? resultMeta.agentMeta?.model : undefined) ||
+        model;
       maybeFinalize();
 
       if (closed) {
