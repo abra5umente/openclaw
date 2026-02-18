@@ -464,6 +464,11 @@ export function createGatewayHttpServer(opts: {
   /** Optional rate limiter for auth brute-force protection. */
   rateLimiter?: AuthRateLimiter;
   tlsOptions?: TlsOptions;
+  broadcast?: (
+    event: string,
+    payload: unknown,
+    opts?: { dropIfSlow?: boolean; stateVersion?: { presence?: number; health?: number } },
+  ) => void;
 }): HttpServer {
   const {
     canvasHost,
@@ -479,6 +484,7 @@ export function createGatewayHttpServer(opts: {
     handlePluginRequest,
     resolvedAuth,
     rateLimiter,
+    broadcast,
   } = opts;
   const httpServer: HttpServer = opts.tlsOptions
     ? createHttpsServer(opts.tlsOptions, (req, res) => {
@@ -555,6 +561,7 @@ export function createGatewayHttpServer(opts: {
             trustedProxies,
             allowRealIpFallback,
             rateLimiter,
+            broadcast,
           })
         ) {
           return;

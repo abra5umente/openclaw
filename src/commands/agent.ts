@@ -217,6 +217,7 @@ function runAgentAttempt(params: {
     streamParams: params.opts.streamParams,
     agentDir: params.agentDir,
     onAgentEvent: params.onAgentEvent,
+    onReasoningStream: params.opts.onReasoningStream,
   });
 }
 
