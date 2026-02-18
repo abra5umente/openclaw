@@ -568,7 +568,7 @@ export function subscribeEmbeddedPiSession(params: SubscribeEmbeddedPiSessionPar
     });
 
     void params.onReasoningStream({
-      text: formatted,
+      text: delta,
     });
   };
 
