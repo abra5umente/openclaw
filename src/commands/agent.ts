@@ -179,6 +179,7 @@ function runAgentAttempt(params: {
     agentDir: params.agentDir,
     onAgentEvent: params.onAgentEvent,
     onReasoningStream: params.opts.onReasoningStream,
+    reasoningLevel: params.opts.onReasoningStream ? "stream" : undefined,
   });
 }
 
