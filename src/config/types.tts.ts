@@ -58,6 +58,8 @@ export type TtsConfig = {
     apiKey?: string;
     model?: string;
     voice?: string;
+    /** Voice instructions for gpt-4o-mini-tts and compatible models. */
+    instructions?: string;
   };
   /** Microsoft Edge (node-edge-tts) configuration. */
   edge?: {
