@@ -15,6 +15,7 @@ import type { ImageContent } from "../commands/agent/types.js";
 import type { GatewayHttpResponsesConfig } from "../config/types.gateway.js";
 import { emitAgentEvent, onAgentEvent } from "../infra/agent-events.js";
 import { logWarn } from "../logger.js";
+import { transcribeOpenAiCompatibleAudio } from "../media-understanding/providers/openai/audio.js";
 import {
   DEFAULT_INPUT_IMAGE_MAX_BYTES,
   DEFAULT_INPUT_IMAGE_MIMES,
@@ -316,6 +317,7 @@ export async function handleOpenResponsesHttpRequest(
   // Extract images + files from input (Phase 2)
   let images: ImageContent[] = [];
   let fileContexts: string[] = [];
+  let audioTranscripts: string[] = [];
   let urlParts = 0;
   const markUrlPart = () => {
     urlParts += 1;
@@ -364,6 +366,34 @@ export async function handleOpenResponsesHttpRequest(
                 media_type?: string;
                 filename?: string;
               };
+
+              // Handle audio files via transcription instead of text extraction
+              if (
+                source.media_type?.startsWith("audio/") &&
+                source.type === "base64" &&
+                source.data
+              ) {
+                try {
+                  const buffer = Buffer.from(source.data, "base64");
+                  const apiKey = process.env.OPENAI_API_KEY;
+                  if (apiKey) {
+                    const result = await transcribeOpenAiCompatibleAudio({
+                      buffer,
+                      mime: source.media_type,
+                      fileName: source.filename || "audio.webm",
+                      apiKey,
+                      timeoutMs: DEFAULT_INPUT_TIMEOUT_MS,
+                    });
+                    if (result.text?.trim()) {
+                      audioTranscripts.push(result.text.trim());
+                    }
+                  }
+                } catch (err) {
+                  logWarn(`openresponses: audio transcription failed: ${String(err)}`);
+                }
+                continue; // Skip normal file extraction for audio
+              }
+
               const sourceType =
                 source.type === "base64" || source.type === "url" ? source.type : undefined;
               if (!sourceType) {
@@ -427,6 +457,13 @@ export async function handleOpenResponsesHttpRequest(
 
   // Build prompt from input
   const prompt = buildAgentPrompt(payload.input);
+
+  if (audioTranscripts.length > 0) {
+    const transcriptBlock = audioTranscripts
+      .map((t) => `[Voice message transcript]: ${t}`)
+      .join("\n");
+    prompt.message = transcriptBlock + (prompt.message ? "\n\n" + prompt.message : "");
+  }
 
   const fileContext = fileContexts.length > 0 ? fileContexts.join("\n\n") : undefined;
   const toolChoiceContext = toolChoicePrompt?.trim();
