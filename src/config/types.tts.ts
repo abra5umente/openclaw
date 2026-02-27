@@ -60,6 +60,8 @@ export type TtsConfig = {
     voice?: string;
     /** Voice instructions for gpt-4o-mini-tts and compatible models. */
     instructions?: string;
+    /** Playback speed (0.25 to 4.0, default 1.0). */
+    speed?: number;
   };
   /** Microsoft Edge (node-edge-tts) configuration. */
   edge?: {
